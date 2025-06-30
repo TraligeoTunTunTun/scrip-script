@@ -80,6 +80,12 @@ from typing  import Any, Dict, List, Tuple, Set, Optional, Type
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+# Heuristic threshold for detecting numeric asset references.
+# Cocos Creator packs often use large integer values for asset IDs.
+# Values greater than this constant are assumed to reference assets.
+# Adjust to tune asset detection for different pack formats.
+ASSET_REF_THRESHOLD = 10000
+
 # ────────────────────────── packed-row column indices ─────────────────────────
 IDX_OVR   = 3          # components / overrides list
 IDX_SIZE  = 5          # [flag, width, height]
@@ -278,7 +284,7 @@ class ValueTypeDeserializer:
         if idx < 0:
             # Negative indices typically reference templates
             return ('template', abs(idx))
-        elif idx > 10000:  # Threshold for asset references (configurable)
+        elif idx > ASSET_REF_THRESHOLD:  # Threshold for asset references (configurable)
             # Large positive indices typically reference assets
             return ('asset', idx)
         elif idx > 0:
@@ -689,9 +695,13 @@ class LabelComponent(DecodedComponent):
             v_align = v_align_map.get(v_align_val, "Top")
         
         # Build color string
+        # Prefer explicit color field, fall back to stored properties
         color_str = "rgba(255,255,255,255)"  # Default white
-        if self.color:
-            color_str = str(self.color)
+        color_val = self.color
+        if color_val is None and hasattr(self, "properties"):
+            color_val = self.properties.get("_color") or self.properties.get("color")
+        if color_val:
+            color_str = str(color_val)
         
         parts = [f"text='{self.text}'"]
         if self.font_size:
@@ -1280,6 +1290,7 @@ class TabRow:
         self.raw = raw
 
     @classmethod
+ codex/modify-tabrow-to-accept-decoder_engine
     def from_raw(cls,
                  node_row: List[Any],
                  templates: List[Any],
@@ -1308,6 +1319,16 @@ class TabRow:
             Shared :class:`ComponentDecoderEngine` instance to decode
             components. If ``None`` a new engine is created.
         """
+
+    def from_raw(cls,
+                 node_row: List[Any],
+                 templates: List[Any],
+                 class_of,
+                 pack_format: Optional[PackFormatInfo] = None,
+                 asset_registry: Dict[int, Any] = None,
+                 bundle_instance: Optional['CocosBundle'] = None,
+                 node_obj: Optional[Dict[str, Any]] = None) -> "TabRow":
+        main
         tpl_index = node_row[0]
         node_name = node_row[1] if len(node_row) > 1 and isinstance(node_row[1], str) else None
         parent_index = node_row[2] if len(node_row) > 2 and isinstance(node_row[2], int) else None
@@ -1396,9 +1417,9 @@ class TabRow:
                 
                 # Add the class method for asset detection with proper asset registry parameter
                 def is_asset_ref(value: int) -> bool:
-                    return (isinstance(value, int) and 
-                            (value in asset_registry or 
-                             value > 10000))  # Fallback heuristic for large indices
+                    return (isinstance(value, int) and
+                            (value in asset_registry or
+                             value > ASSET_REF_THRESHOLD))  # Fallback heuristic for large indices
                 helper.is_asset_reference = is_asset_ref
                 
                 # Enhanced asset type detection
@@ -1488,7 +1509,7 @@ class TabRow:
                         if comp_cls == "cc.Sprite" and abs(value) > 0:
                             return True
                         # Standard detection for other components
-                        return abs(value) > 10000
+                        return abs(value) > ASSET_REF_THRESHOLD
                     helper.is_asset_reference = enhanced_asset_detection
                     
                     decoded_component = decoder_engine.decode_component(
@@ -1503,10 +1524,48 @@ class TabRow:
                         # Special handling for Labels - keep backward compatibility
                         text = decoded_component.text
                         font = decoded_component.font_asset
-                        col = None  # TODO: Extract from color property
+
+                        # Extract node color from object or component properties
+                        # Node _color values map directly to our Color dataclass
+                        def _decode_color(val: Any) -> Any:
+                            if val is None:
+                                return None
+                            # Support value-type arrays, dicts or packed ints
+                            if isinstance(val, list):
+                                if ValueTypeDeserializer.is_value_array(val):
+                                    val = ValueTypeDeserializer.decode(val)
+                                    if isinstance(val, Color):
+                                        return val
+                                if len(val) in (3, 4) and all(isinstance(x, (int, float)) for x in val):
+                                    r, g, b = int(val[0]), int(val[1]), int(val[2])
+                                    a = int(val[3]) if len(val) == 4 else 255
+                                    return Color(r, g, b, a)
+                            if isinstance(val, dict):
+                                r = int(val.get('r', 255))
+                                g = int(val.get('g', 255))
+                                b = int(val.get('b', 255))
+                                a = int(val.get('a', 255))
+                                return Color(r, g, b, a)
+                            if isinstance(val, int):
+                                decoded = ValueTypeDeserializer.decode([ValueTypeID.Color, val])
+                                if isinstance(decoded, Color):
+                                    return decoded
+                            if isinstance(val, Color):
+                                return val
+                            return None
+
+                        col = None
+                        if node_obj and isinstance(node_obj, dict):
+                            col = _decode_color(node_obj.get('_color'))
+                        if not col and hasattr(decoded_component, 'properties'):
+                            col = _decode_color(
+                                decoded_component.properties.get('_color') or
+                                decoded_component.properties.get('color'))
+
                         comp = LabelComp(comp_tpl, comp_cls, text, font, col)
                         comp.decoded_component = decoded_component
                         comp.properties = decoded_component.properties
+                        decoded_component.color = col
                         components.append(comp)
                     elif comp_cls == "cc.Sprite" and isinstance(decoded_component, SpriteComponent):
                         # Enhanced sprite frame resolution using comprehensive matching strategies
@@ -1753,6 +1812,7 @@ class CocosBundle:
         offs=self._block_offs(blocks)
         block_id=self._scene_block(blocks,templates,class_of); rows=blocks[block_id]
 
+ codex/modify-tabrow-to-accept-decoder_engine
         decoder_engine = ComponentDecoderEngine()
         nodes:Dict[Tuple[int,int],Node]={}
         for i, raw in enumerate(rows):
@@ -1768,6 +1828,19 @@ class CocosBundle:
             )
             g_idx = offs[block_id]+i
             obj = data[g_idx] if 0<=g_idx<len(data) and isinstance(data[g_idx],dict) else {}
+
+        nodes:Dict[Tuple[int,int],Node]={}
+        for i, raw in enumerate(rows):
+            g_idx = offs[block_id]+i
+            obj = data[g_idx] if 0<=g_idx<len(data) and isinstance(data[g_idx],dict) else {}
+            # Pass the bundle instance and node object to TabRow
+            row = TabRow.from_raw(
+                raw, templates, class_of, pack_format,
+                asset_registry=getattr(self, 'assets', {}),
+                bundle_instance=self,
+                node_obj=obj,
+            )
+ main
             # Enhanced size extraction: try object block's "_contentSize" if not found in raw_row
             enhanced_size = row.size
             if enhanced_size == "-" and "_contentSize" in obj:
