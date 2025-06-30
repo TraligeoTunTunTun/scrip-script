@@ -1290,6 +1290,36 @@ class TabRow:
         self.raw = raw
 
     @classmethod
+ codex/modify-tabrow-to-accept-decoder_engine
+    def from_raw(cls,
+                 node_row: List[Any],
+                 templates: List[Any],
+                 class_of,
+                 pack_format: Optional[PackFormatInfo] = None,
+                 asset_registry: Dict[int, Any] = None,
+                 bundle_instance: Optional['CocosBundle'] = None,
+                 decoder_engine: Optional[ComponentDecoderEngine] = None) -> "TabRow":
+        """Create a :class:`TabRow` from a raw packed node entry.
+
+        Parameters
+        ----------
+        node_row:
+            Raw list from the pack representing a node.
+        templates:
+            Template table from the pack data.
+        class_of:
+            Function mapping a template index to its class name.
+        pack_format:
+            Parsed :class:`PackFormatInfo` describing the pack (optional).
+        asset_registry:
+            Mapping of asset indices to metadata (optional).
+        bundle_instance:
+            Reference to the :class:`CocosBundle` being processed (optional).
+        decoder_engine:
+            Shared :class:`ComponentDecoderEngine` instance to decode
+            components. If ``None`` a new engine is created.
+        """
+
     def from_raw(cls,
                  node_row: List[Any],
                  templates: List[Any],
@@ -1298,6 +1328,7 @@ class TabRow:
                  asset_registry: Dict[int, Any] = None,
                  bundle_instance: Optional['CocosBundle'] = None,
                  node_obj: Optional[Dict[str, Any]] = None) -> "TabRow":
+        main
         tpl_index = node_row[0]
         node_name = node_row[1] if len(node_row) > 1 and isinstance(node_row[1], str) else None
         parent_index = node_row[2] if len(node_row) > 2 and isinstance(node_row[2], int) else None
@@ -1355,7 +1386,7 @@ class TabRow:
         #print(node_row)
         # Components with enhanced property mapping using ComponentDecoder engine
         components: List[Component] = []
-        decoder_engine = ComponentDecoderEngine()  # Initialize the decoder engine
+        decoder_engine = decoder_engine or ComponentDecoderEngine()
         
         if len(node_row) > IDX_OVR and isinstance(node_row[IDX_OVR], list):
             for comp_row in node_row[IDX_OVR]:
@@ -1743,6 +1774,12 @@ class CocosBundle:
                 seen.add(path); yield f"pack:{pk}", path
 
     def _inspect_pack(self,label:str,pack:Path):
+        """Inspect a single pack file and decode its contents.
+
+        A :class:`ComponentDecoderEngine` is created once per pack and
+        passed to all :meth:`TabRow.from_raw` calls so component decoders
+        can share state across nodes.
+        """
         data=json.loads(pack.read_text("utf8"))
         if not (isinstance(data,list) and len(data)>self.IDX_FIRST):
             return print(f"[skip] {label}")
@@ -1775,6 +1812,23 @@ class CocosBundle:
         offs=self._block_offs(blocks)
         block_id=self._scene_block(blocks,templates,class_of); rows=blocks[block_id]
 
+ codex/modify-tabrow-to-accept-decoder_engine
+        decoder_engine = ComponentDecoderEngine()
+        nodes:Dict[Tuple[int,int],Node]={}
+        for i, raw in enumerate(rows):
+            # Pass the bundle instance to TabRow for sprite frame resolution
+            row = TabRow.from_raw(
+                raw,
+                templates,
+                class_of,
+                pack_format,
+                asset_registry=getattr(self, 'assets', {}),
+                bundle_instance=self,
+                decoder_engine=decoder_engine,
+            )
+            g_idx = offs[block_id]+i
+            obj = data[g_idx] if 0<=g_idx<len(data) and isinstance(data[g_idx],dict) else {}
+
         nodes:Dict[Tuple[int,int],Node]={}
         for i, raw in enumerate(rows):
             g_idx = offs[block_id]+i
@@ -1786,6 +1840,7 @@ class CocosBundle:
                 bundle_instance=self,
                 node_obj=obj,
             )
+ main
             # Enhanced size extraction: try object block's "_contentSize" if not found in raw_row
             enhanced_size = row.size
             if enhanced_size == "-" and "_contentSize" in obj:
