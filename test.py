@@ -80,6 +80,12 @@ from typing  import Any, Dict, List, Tuple, Set, Optional, Type
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+# Heuristic threshold for detecting numeric asset references.
+# Cocos Creator packs often use large integer values for asset IDs.
+# Values greater than this constant are assumed to reference assets.
+# Adjust to tune asset detection for different pack formats.
+ASSET_REF_THRESHOLD = 10000
+
 # ────────────────────────── packed-row column indices ─────────────────────────
 IDX_OVR   = 3          # components / overrides list
 IDX_SIZE  = 5          # [flag, width, height]
@@ -278,7 +284,7 @@ class ValueTypeDeserializer:
         if idx < 0:
             # Negative indices typically reference templates
             return ('template', abs(idx))
-        elif idx > 10000:  # Threshold for asset references (configurable)
+        elif idx > ASSET_REF_THRESHOLD:  # Threshold for asset references (configurable)
             # Large positive indices typically reference assets
             return ('asset', idx)
         elif idx > 0:
@@ -1375,9 +1381,9 @@ class TabRow:
                 
                 # Add the class method for asset detection with proper asset registry parameter
                 def is_asset_ref(value: int) -> bool:
-                    return (isinstance(value, int) and 
-                            (value in asset_registry or 
-                             value > 10000))  # Fallback heuristic for large indices
+                    return (isinstance(value, int) and
+                            (value in asset_registry or
+                             value > ASSET_REF_THRESHOLD))  # Fallback heuristic for large indices
                 helper.is_asset_reference = is_asset_ref
                 
                 # Enhanced asset type detection
@@ -1467,7 +1473,7 @@ class TabRow:
                         if comp_cls == "cc.Sprite" and abs(value) > 0:
                             return True
                         # Standard detection for other components
-                        return abs(value) > 10000
+                        return abs(value) > ASSET_REF_THRESHOLD
                     helper.is_asset_reference = enhanced_asset_detection
                     
                     decoded_component = decoder_engine.decode_component(
